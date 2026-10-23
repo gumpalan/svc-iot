@@ -1,0 +1,21 @@
+devices:
+  - id: "kipas1"
+    name: "Kipas Angin Kamar"
+    driver: "tasmota"
+    topic: "kipas1"
+    capabilities:
+      - type: "switch"
+
+  - id: "lampu-tidur"
+    name: "Lampu Tidur"
+    driver: "generic_mqtt"
+    capabilities:
+      - type: "switch"
+      - type: "dimmer"
+    config:
+      command_topic: "gumpalan/device/lampu-tidur/switch/set"
+      state_topic: "gumpalan/device/lampu-tidur/switch/state"
+      payload_on: "ON"
+      payload_off: "OFF"
+      dimmer_command_topic: "gumpalan/device/lampu-tidur/dimmer/set"
+      dimmer_state_topic: "gumpalan/device/lampu-tidur/dimmer/state"
