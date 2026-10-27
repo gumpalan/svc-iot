@@ -6,7 +6,12 @@ import (
 	"net/http"
 	"os"
 
+	"github.com/gumpalan/svc-iot/internal/config"
+	"github.com/gumpalan/svc-iot/internal/core"
 	"github.com/gumpalan/svc-iot/internal/database"
+	"github.com/gumpalan/svc-iot/internal/httpapi"
+	"github.com/gumpalan/svc-iot/internal/mqtt"
+	"github.com/gumpalan/svc-iot/internal/store"
 	"github.com/gumpalan/svc-iot/migrations"
 )
 
@@ -32,12 +37,53 @@ func main() {
 		log.Println("Migrasi database berhasil.")
 	}
 
-	mux := http.NewServeMux()
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"status":"ok","service":"svc-iot"}`))
+	st := store.New(db, dialect)
+
+	// 1. Muat deklarasi perangkat dari berkas YAML
+	devConfigPath := os.Getenv("DEVICES_CONFIG_PATH")
+	if devConfigPath == "" {
+		devConfigPath = "config/devices.yaml"
+		if _, err := os.Stat(devConfigPath); os.IsNotExist(err) {
+			devConfigPath = "config/devices.example.yaml"
+		}
+	}
+
+	devCfg, err := config.LoadDevicesFile(devConfigPath)
+	if err != nil {
+		log.Printf("[Peringatan] Gagal memuat %s: %v. Menggunakan registri kosong.", devConfigPath, err)
+		devCfg = &config.Config{}
+	} else {
+		log.Printf("Berhasil memuat konfigurasi perangkat dari %s (%d perangkat terdaftar)", devConfigPath, len(devCfg.Devices))
+	}
+
+	// 2. Inisialisasi Registry dan State Hub
+	registry := core.NewDeviceRegistry(devCfg)
+	hub := core.NewStateHub(registry, nil)
+
+	// 3. Inisialisasi MQTT client
+	mqttCfg := mqtt.LoadConfig()
+	mqttClient, err := mqtt.NewClient(mqttCfg, func(topic string, payload []byte) {
+		hub.HandleInboundMQTT(topic, payload)
 	})
+	if err != nil {
+		log.Printf("[MQTT] Gagal menyambung ke broker %s: %v (berjalan tanpa koneksi broker aktif)", mqttCfg.Broker, err)
+	} else {
+		defer mqttClient.Close()
+		hub.SetPublisher(mqttClient)
+
+		// Subscribe topik seluruh perangkat
+		subTopics := registry.AllSubscriptionTopics()
+		if len(subTopics) > 0 {
+			if err := mqttClient.SubscribeTopics(subTopics); err != nil {
+				log.Printf("[MQTT] Gagal subscribe topik: %v", err)
+			}
+		}
+	}
+
+	// 4. Inisialisasi HTTP & WebSocket Router
+	mux := http.NewServeMux()
+	handler := httpapi.NewHandler(registry, hub, st)
+	handler.RegisterRoutes(mux)
 
 	port := os.Getenv("PORT")
 	if port == "" {

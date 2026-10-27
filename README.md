@@ -6,50 +6,66 @@ Layanan backend IoT modular untuk platform Gumpalan. Dirancang agar dapat disesu
 
 ## Status
 
-**Scaffold** (kerangka awal dengan migrasi SQLite/MySQL/PostgreSQL, abstraksi driver murni, stub driver Tasmota & Generic MQTT, serta healthz endpoint).
-
-## Empat Tingkat Penyesuaian IoT
-
-Sistem dirancang dengan 4 level ekstensibilitas (dari yang paling mudah):
-
-1. **Konfigurasi (`config/devices.yaml`)**:
-   Hubungkan perangkat baru ke driver bawaan (`tasmota` atau `generic_mqtt`) tanpa menulis kode satu baris pun.
-2. **Discovery Otomatis (MQTT)** *(rencana)*:
-   Perangkat mengirim payload retained ke topik `gumpalan/discovery/<id>` berisi daftar kapabilitasnya. `svc-iot` akan mendaftarkannya otomatis ke tabel database `iot_devices`.
-3. **Adapter Eksternal** *(rencana)*:
-   Proses mandiri (Python, Node.js, Go) yang menerjemahkan protokol pihak ketiga (Zigbee2MQTT, BLE, Tuya, dll.) ke struktur pesan topik MQTT Gumpalan.
-4. **Driver Go Mandiri (`pkg/driver`)**:
-   Repositori atau paket eksternal mengimpor `pkg/driver`, mengimplementasikan antarmuka murni `driver.Driver`, dan didaftarkan saat inisialisasi tanpa melakukan fork kode inti.
+**Aktif & Siap Terintegrasi**:
+- Parsing deklarasi perangkat statis fleksibel (`config/devices.yaml`) berbasis channel (input, output, bidirectional, tipe data, hint UI).
+- Driver kustom fleksibel dan driver preset bawaan (Tasmota).
+- Integrasi MQTT client (Paho MQTT) dengan auto-reconnect dan langganan dinamis.
+- Cache state perangkat in-memory dan endpoint real-time WebSocket (`/iot/v1/ws`).
+- Penyimpanan database SQLite/MySQL/PostgreSQL untuk layout dashboard pengguna (`iot_dashboards`) dan hak akses kontrol (`iot_device_permissions`).
+- Fitur pencarian dan kloning layout dashboard pengguna lain dengan validasi izin perangkat yang sama.
 
 ## Struktur Repositori
 
 ```
 svc-iot/
 ├── cmd/iot/main.go               # Titik masuk aplikasi (:8002)
-├── pkg/driver/                   # Antarmuka driver publik (dapat di-import pihak ketiga)
+├── pkg/driver/                   # Antarmuka driver publik
 │   └── driver.go
 ├── internal/
-│   ├── config/                   # Parser config/devices.yaml
-│   ├── core/                     # Registri perangkat, cache state, event bus
+│   ├── config/                   # Parser konfigurasi devices.yaml
+│   ├── core/                     # Registri perangkat, cache state, WebSocket hub
 │   ├── database/                 # Koneksi multi-mesin, dialect rebind, auto-migrate
 │   ├── discovery/                # Listener topik discovery otomatis
 │   ├── driver/                   # Driver bawaan (tasmota, genericmqtt)
-│   ├── httpapi/                  # REST handler OpenAPI
-│   ├── mqtt/                     # Manajemen koneksi MQTT broker lokal
-│   └── store/                    # Akses tabel database iot_devices
+│   ├── httpapi/                  # REST handler & WebSocket endpoint
+│   ├── mqtt/                     # Manajemen koneksi MQTT broker (Paho MQTT)
+│   └── store/                    # Penyimpanan dashboard pengguna & izin perangkat
 ├── config/
-│   └── devices.example.yaml      # Contoh deklarasi perangkat statis
+│   ├── devices.example.yaml      # Contoh deklarasi perangkat & channel
+│   └── devices.yaml              # Konfigurasi aktif perangkat
 ├── migrations/
-│   ├── 0001_init.sql             # Skema goose portabel tabel iot_devices
+│   ├── 0001_init.sql             # Skema goose tabel iot_devices
+│   ├── 0002_dashboards_and_permissions.sql # Skema tabel dashboard & izin akses
 │   └── fs.go                     # embed.FS berkas migrasi
 ├── .env.example                  # Variabel lingkungan
 ├── Makefile                      # Build, test, dan cross-compile arm64
 └── README.md
 ```
 
-## Konfigurasi Database
+## Menjalankan Layanan
 
-Database ditentukan via environment variable (kompatibel Laravel):
+### Menjalankan Langsung:
+```bash
+make run
+# atau
+go run ./cmd/iot
+```
+
+### Menjalankan Pengujian:
+```bash
+make test
+# atau
+go test -v ./...
+```
+
+### Build Binary:
+```bash
+make build
+```
+
+## Konfigurasi Lingkungan (.env)
+
+Variabel lingkungan yang didukung:
 
 | Variabel | Pilihan Nilai | Default | Keterangan |
 | --- | --- | --- | --- |
@@ -61,25 +77,67 @@ Database ditentukan via environment variable (kompatibel Laravel):
 | `DB_PASSWORD` | String | - | Password database |
 | `DB_SSLMODE` | `disable`, `require`, dll | `disable` | Khusus PostgreSQL |
 | `DB_URL` | DSN lengkap | - | Menimpa variabel di atas jika diisi |
-| `DB_AUTO_MIGRATE` | `true`, `false` | `true` | Menjalankan migrasi saat startup |
+| `DB_AUTO_MIGRATE` | `true`, `false` | `true` | Menjalankan migrasi goose otomatis saat startup |
+| `PORT` | Angka | `8002` | Port listener HTTP/WebSocket |
+| `DEVICES_CONFIG_PATH`| Path berkas | `config/devices.yaml` | Lokasi berkas YAML deklarasi perangkat |
+| `MQTT_BROKER` | Host / URL | `tcp://127.0.0.1:1883` | Alamat broker MQTT (misal `broker.emqx.io:1883`) |
+| `MQTT_CLIENT_ID` | String | `gumpalan_svc_iot_<timestamp>` | ID client MQTT |
+| `MQTT_USERNAME` | String | - | Username otentikasi broker MQTT |
+| `MQTT_PASSWORD` | String | - | Password otentikasi broker MQTT |
 
-## Rencana Pengujian Database Tambahan
+## Format Deklarasi Perangkat (`devices.yaml`)
 
-Unit test database saat ini memverifikasi parser konfigurasi, dialek rebind PostgreSQL, dan operasi SQLite in-memory. Pengujian integrasi MariaDB dan PostgreSQL akan ditambahkan melalui skrip pengujian berbasis kontainer.
+```yaml
+devices:
+  - id: "living-room-sensor"
+    name: "Sensor Ruang Tamu"
+    driver: "custom" # custom | tasmota | generic_mqtt
+    channels:
+      - id: "temperature"
+        name: "Suhu"
+        direction: "input" # input | output | bidirectional
+        topic: "gumpalan/device/living-room/tele/temp"
+        type: "number" # number | boolean | string | enum
+        unit: "°C"
+        min: 0
+        max: 50
+        ui_hint: "gauge"
+
+      - id: "fan_power"
+        name: "Power Kipas"
+        direction: "bidirectional"
+        command_topic: "gumpalan/device/living-room/cmd/fan"
+        state_topic: "gumpalan/device/living-room/stat/fan"
+        type: "boolean"
+        ui_hint: "toggle"
+```
+
+## Daftar Endpoint REST & WebSocket
+
+Semua endpoint modul berada di bawah prefix `/iot/v1/`:
+
+| Metode | Endpoint | Keterangan |
+| --- | --- | --- |
+| `GET` | `/iot/v1/healthz` | Health check layanan |
+| `GET` | `/iot/v1/ws` | Stream WebSocket dua arah (telemetri & command) |
+| `GET` | `/iot/v1/devices` | Daftar perangkat dan status channel terkini |
+| `GET` | `/iot/v1/devices/{id}` | Detail satu perangkat |
+| `POST` | `/iot/v1/devices/{id}/command` | Kirim perintah ke channel perangkat (`{"channel":"...","value":...}`) |
+| `GET` | `/iot/v1/dashboards` | Daftar layout dashboard milik pengguna aktif |
+| `POST` | `/iot/v1/dashboards` | Buat layout dashboard baru |
+| `GET` | `/iot/v1/dashboards/{id}` | Ambil layout dashboard berdasarkan ID |
+| `PUT` | `/iot/v1/dashboards/{id}` | Perbarui layout dashboard |
+| `DELETE`| `/iot/v1/dashboards/{id}` | Hapus layout dashboard |
+| `GET` | `/iot/v1/dashboards/explore` | Jelajahi layout publik pengguna lain (terfilter perangkat yang sama) |
+| `POST` | `/iot/v1/dashboards/{id}/clone` | Kloning layout dashboard publik ke akun pengguna aktif |
 
 ## Lisensi dan Dependensi
 
-Lisensi repositori ini **belum ditentukan**.
-
-### Dependensi Langsung:
-- `modernc.org/sqlite` (BSD-3-Clause) - Driver SQLite pure Go tanpa CGO.
-- `github.com/go-sql-driver/mysql` (MPL-2.0) - Driver MySQL/MariaDB (copyleft tingkat berkas; aman digunakan sebagai pustaka tanpa modifikasi berkas driver).
-- `github.com/jackc/pgx/v5` (MIT) - Driver PostgreSQL stdlib.
-- `github.com/pressly/goose/v3` (MIT) - Pustaka migrasi database.
-- `github.com/joho/godotenv` (MIT) - Parser berkas .env.
-- `gopkg.in/yaml.v3` (MIT / Apache-2.0) - Parser konfigurasi YAML.
-
-### Memeriksa Lisensi:
-```bash
-go run github.com/google/go-licenses@latest report ./...
-```
+- `modernc.org/sqlite` (BSD-3-Clause)
+- `github.com/go-sql-driver/mysql` (MPL-2.0)
+- `github.com/jackc/pgx/v5` (MIT)
+- `github.com/pressly/goose/v3` (MIT)
+- `github.com/joho/godotenv` (MIT)
+- `gopkg.in/yaml.v3` (MIT / Apache-2.0)
+- `github.com/eclipse/paho.mqtt.golang` (EPL-2.0 / BSD-3-Clause)
+- `github.com/gorilla/websocket` (BSD-2-Clause)

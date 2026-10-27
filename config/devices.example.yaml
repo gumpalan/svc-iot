@@ -1,21 +1,67 @@
 devices:
-  - id: "kipas1"
-    name: "Kipas Angin Kamar"
-    driver: "tasmota"
-    topic: "kipas1"
-    capabilities:
-      - type: "switch"
+  - id: "living-room-sensor"
+    name: "Sensor Ruang Tamu"
+    driver: "custom"
+    channels:
+      - id: "temperature"
+        name: "Suhu"
+        direction: "input"
+        topic: "gumpalan/device/living-room/tele/temp"
+        type: "number"
+        unit: "°C"
+        min: 0
+        max: 50
+        ui_hint: "gauge"
 
-  - id: "lampu-tidur"
-    name: "Lampu Tidur"
-    driver: "generic_mqtt"
-    capabilities:
-      - type: "switch"
-      - type: "dimmer"
-    config:
-      command_topic: "gumpalan/device/lampu-tidur/switch/set"
-      state_topic: "gumpalan/device/lampu-tidur/switch/state"
-      payload_on: "ON"
-      payload_off: "OFF"
-      dimmer_command_topic: "gumpalan/device/lampu-tidur/dimmer/set"
-      dimmer_state_topic: "gumpalan/device/lampu-tidur/dimmer/state"
+      - id: "humidity"
+        name: "Kelembaban"
+        direction: "input"
+        topic: "gumpalan/device/living-room/tele/humidity"
+        type: "number"
+        unit: "%"
+        min: 0
+        max: 100
+        ui_hint: "value_display"
+
+      - id: "fan_power"
+        name: "Power Kipas"
+        direction: "bidirectional"
+        command_topic: "gumpalan/device/living-room/cmd/fan"
+        state_topic: "gumpalan/device/living-room/stat/fan"
+        type: "boolean"
+        ui_hint: "toggle"
+
+  - id: "lampu-kamar"
+    name: "Lampu Kamar Tidur"
+    driver: "tasmota"
+    topic: "lampu_kamar"
+    channels:
+      - id: "power"
+        name: "Power Lampu"
+        direction: "bidirectional"
+        command_topic: "cmnd/lampu_kamar/POWER"
+        state_topic: "stat/lampu_kamar/POWER"
+        type: "boolean"
+        ui_hint: "toggle"
+
+  - id: "smart-clock"
+    name: "Smart Clock ESP32"
+    driver: "custom"
+    channels:
+      - id: "display_text"
+        name: "Teks Layar"
+        direction: "output"
+        command_topic: "gumpalan/clock/display/set"
+        type: "string"
+        ui_hint: "text_input"
+
+      - id: "brightness"
+        name: "Kecerahan Layar"
+        direction: "bidirectional"
+        command_topic: "gumpalan/clock/brightness/set"
+        state_topic: "gumpalan/clock/brightness/stat"
+        type: "number"
+        min: 0
+        max: 100
+        unit: "%"
+        ui_hint: "slider"
