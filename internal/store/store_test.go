@@ -163,3 +163,64 @@ func TestCheckDeviceAccess(t *testing.T) {
 		t.Fatalf("expected 0 perms after delete, got %d", len(permsAfter))
 	}
 }
+
+func TestAutomationRuleCRUD(t *testing.T) {
+	s, db := setupTestDB(t)
+	defer db.Close()
+	ctx := context.Background()
+
+	devID := "living-room-sensor"
+	chID := "temperature"
+	op := ">"
+	val := "30.0"
+
+	rule := &AutomationRule{
+		ID:               "rule-1",
+		UserID:           "user-101",
+		Name:             "Kipas Otomatis",
+		Enabled:          true,
+		TriggerType:      "state",
+		TriggerDeviceID:  &devID,
+		TriggerChannelID: &chID,
+		TriggerOperator:  &op,
+		TriggerValue:     &val,
+		ActionDeviceID:   "fan-1",
+		ActionChannelID:  "power",
+		ActionValue:      "true",
+	}
+
+	if err := s.CreateAutomationRule(ctx, rule); err != nil {
+		t.Fatalf("CreateAutomationRule failed: %v", err)
+	}
+
+	got, err := s.GetAutomationRule(ctx, "rule-1")
+	if err != nil {
+		t.Fatalf("GetAutomationRule failed: %v", err)
+	}
+	if got.Name != "Kipas Otomatis" || *got.TriggerOperator != ">" || got.ActionValue != "true" {
+		t.Errorf("unexpected rule content: %+v", got)
+	}
+
+	activeRules, err := s.ListActiveAutomationRules(ctx)
+	if err != nil || len(activeRules) != 1 {
+		t.Fatalf("expected 1 active rule, got %d (err: %v)", len(activeRules), err)
+	}
+
+	// Toggle disabled
+	if err := s.ToggleAutomationRule(ctx, "rule-1", "user-101", false); err != nil {
+		t.Fatalf("ToggleAutomationRule failed: %v", err)
+	}
+	activeAfter, _ := s.ListActiveAutomationRules(ctx)
+	if len(activeAfter) != 0 {
+		t.Fatalf("expected 0 active rules after toggle, got %d", len(activeAfter))
+	}
+
+	// Delete
+	if err := s.DeleteAutomationRule(ctx, "rule-1", "user-101"); err != nil {
+		t.Fatalf("DeleteAutomationRule failed: %v", err)
+	}
+	_, err = s.GetAutomationRule(ctx, "rule-1")
+	if err != ErrNotFound {
+		t.Fatalf("expected ErrNotFound after delete, got %v", err)
+	}
+}

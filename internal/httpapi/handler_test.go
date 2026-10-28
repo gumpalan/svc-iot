@@ -170,3 +170,79 @@ func TestHTTPAPI_DashboardsCRUDAndClone(t *testing.T) {
 		t.Fatalf("cloned dashboard mismatch: %+v", cloned)
 	}
 }
+
+func TestHTTPAPI_AutomationRules(t *testing.T) {
+	ts, _, _ := setupTestServer(t)
+	defer ts.Close()
+
+	// 1. Create Rule
+	devID := "lamp1"
+	chID := "power"
+	op := "=="
+	val := "true"
+	payload := store.AutomationRule{
+		Name:             "Matikan Lampu Saat Siang",
+		Enabled:          true,
+		TriggerType:      "schedule",
+		TriggerCron:      &val,
+		ActionDeviceID:   devID,
+		ActionChannelID:  chID,
+		ActionValue:      "false",
+		TriggerDeviceID:  &devID,
+		TriggerChannelID: &chID,
+		TriggerOperator:  &op,
+		TriggerValue:     &val,
+	}
+	body, _ := json.Marshal(payload)
+	req, _ := http.NewRequest(http.MethodPost, ts.URL+"/iot/v1/rules", bytes.NewReader(body))
+	req.Header.Set("X-User-Id", "user_1")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusCreated {
+		t.Fatalf("create rule failed: status %d, err %v", resp.StatusCode, err)
+	}
+	var created store.AutomationRule
+	_ = json.NewDecoder(resp.Body).Decode(&created)
+	resp.Body.Close()
+
+	if created.ID == "" || created.UserID != "user_1" {
+		t.Fatalf("unexpected created rule: %+v", created)
+	}
+
+	// 2. List Rules
+	listReq, _ := http.NewRequest(http.MethodGet, ts.URL+"/iot/v1/rules", nil)
+	listReq.Header.Set("X-User-Id", "user_1")
+	listResp, _ := http.DefaultClient.Do(listReq)
+	var list []store.AutomationRule
+	_ = json.NewDecoder(listResp.Body).Decode(&list)
+	listResp.Body.Close()
+	if len(list) != 1 {
+		t.Fatalf("expected 1 rule, got %d", len(list))
+	}
+
+	// 3. Toggle Rule
+	toggleReq, _ := http.NewRequest(http.MethodPatch, ts.URL+"/iot/v1/rules/"+created.ID+"/toggle", bytes.NewReader([]byte(`{"enabled":false}`)))
+	toggleReq.Header.Set("X-User-Id", "user_1")
+	toggleResp, _ := http.DefaultClient.Do(toggleReq)
+	if toggleResp.StatusCode != http.StatusOK {
+		t.Fatalf("toggle failed: status %d", toggleResp.StatusCode)
+	}
+	toggleResp.Body.Close()
+
+	// 4. Test Fire Action
+	testReq, _ := http.NewRequest(http.MethodPost, ts.URL+"/iot/v1/rules/"+created.ID+"/test", nil)
+	testReq.Header.Set("X-User-Id", "user_1")
+	testResp, _ := http.DefaultClient.Do(testReq)
+	if testResp.StatusCode != http.StatusOK {
+		t.Fatalf("test-fire failed: status %d", testResp.StatusCode)
+	}
+	testResp.Body.Close()
+
+	// 5. Delete Rule
+	delReq, _ := http.NewRequest(http.MethodDelete, ts.URL+"/iot/v1/rules/"+created.ID, nil)
+	delReq.Header.Set("X-User-Id", "user_1")
+	delResp, _ := http.DefaultClient.Do(delReq)
+	if delResp.StatusCode != http.StatusOK {
+		t.Fatalf("delete rule failed: status %d", delResp.StatusCode)
+	}
+	delResp.Body.Close()
+}

@@ -312,3 +312,256 @@ func (s *Store) DeletePermission(ctx context.Context, id string) error {
 	}
 	return nil
 }
+
+// ----------------------------------------------------------------------
+// Automation Rules CRUD
+// ----------------------------------------------------------------------
+
+func (s *Store) CreateAutomationRule(ctx context.Context, r *AutomationRule) error {
+	now := time.Now().Unix()
+	r.CreatedAt = now
+	r.UpdatedAt = now
+
+	query := database.Rebind(s.dialect, `
+		INSERT INTO iot_automation_rules (
+			id, user_id, name, enabled,
+			trigger_type, trigger_device_id, trigger_channel_id, trigger_operator, trigger_value, trigger_cron,
+			action_device_id, action_channel_id, action_value,
+			created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+
+	_, err := s.db.ExecContext(ctx, query,
+		r.ID, r.UserID, r.Name, r.Enabled,
+		r.TriggerType, r.TriggerDeviceID, r.TriggerChannelID, r.TriggerOperator, r.TriggerValue, r.TriggerCron,
+		r.ActionDeviceID, r.ActionChannelID, r.ActionValue,
+		r.CreatedAt, r.UpdatedAt,
+	)
+	if err != nil {
+		return fmt.Errorf("create automation rule: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) GetAutomationRule(ctx context.Context, id string) (*AutomationRule, error) {
+	query := database.Rebind(s.dialect, `
+		SELECT id, user_id, name, enabled,
+		       trigger_type, trigger_device_id, trigger_channel_id, trigger_operator, trigger_value, trigger_cron,
+		       action_device_id, action_channel_id, action_value,
+		       created_at, updated_at
+		FROM iot_automation_rules
+		WHERE id = ?
+	`)
+
+	row := s.db.QueryRowContext(ctx, query, id)
+	var r AutomationRule
+	var trDev, trCh, trOp, trVal, trCron sql.NullString
+	err := row.Scan(
+		&r.ID, &r.UserID, &r.Name, &r.Enabled,
+		&r.TriggerType, &trDev, &trCh, &trOp, &trVal, &trCron,
+		&r.ActionDeviceID, &r.ActionChannelID, &r.ActionValue,
+		&r.CreatedAt, &r.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("get automation rule: %w", err)
+	}
+
+	if trDev.Valid {
+		r.TriggerDeviceID = &trDev.String
+	}
+	if trCh.Valid {
+		r.TriggerChannelID = &trCh.String
+	}
+	if trOp.Valid {
+		r.TriggerOperator = &trOp.String
+	}
+	if trVal.Valid {
+		r.TriggerValue = &trVal.String
+	}
+	if trCron.Valid {
+		r.TriggerCron = &trCron.String
+	}
+
+	return &r, nil
+}
+
+func (s *Store) ListAutomationRules(ctx context.Context, userID string) ([]*AutomationRule, error) {
+	var query string
+	var args []any
+	if userID != "" {
+		query = database.Rebind(s.dialect, `
+			SELECT id, user_id, name, enabled,
+			       trigger_type, trigger_device_id, trigger_channel_id, trigger_operator, trigger_value, trigger_cron,
+			       action_device_id, action_channel_id, action_value,
+			       created_at, updated_at
+			FROM iot_automation_rules
+			WHERE user_id = ?
+			ORDER BY created_at DESC
+		`)
+		args = append(args, userID)
+	} else {
+		query = database.Rebind(s.dialect, `
+			SELECT id, user_id, name, enabled,
+			       trigger_type, trigger_device_id, trigger_channel_id, trigger_operator, trigger_value, trigger_cron,
+			       action_device_id, action_channel_id, action_value,
+			       created_at, updated_at
+			FROM iot_automation_rules
+			ORDER BY created_at DESC
+		`)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list automation rules: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*AutomationRule
+	for rows.Next() {
+		var r AutomationRule
+		var trDev, trCh, trOp, trVal, trCron sql.NullString
+		err := rows.Scan(
+			&r.ID, &r.UserID, &r.Name, &r.Enabled,
+			&r.TriggerType, &trDev, &trCh, &trOp, &trVal, &trCron,
+			&r.ActionDeviceID, &r.ActionChannelID, &r.ActionValue,
+			&r.CreatedAt, &r.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan automation rule: %w", err)
+		}
+		if trDev.Valid {
+			r.TriggerDeviceID = &trDev.String
+		}
+		if trCh.Valid {
+			r.TriggerChannelID = &trCh.String
+		}
+		if trOp.Valid {
+			r.TriggerOperator = &trOp.String
+		}
+		if trVal.Valid {
+			r.TriggerValue = &trVal.String
+		}
+		if trCron.Valid {
+			r.TriggerCron = &trCron.String
+		}
+		list = append(list, &r)
+	}
+	return list, nil
+}
+
+func (s *Store) ListActiveAutomationRules(ctx context.Context) ([]*AutomationRule, error) {
+	query := database.Rebind(s.dialect, `
+		SELECT id, user_id, name, enabled,
+		       trigger_type, trigger_device_id, trigger_channel_id, trigger_operator, trigger_value, trigger_cron,
+		       action_device_id, action_channel_id, action_value,
+		       created_at, updated_at
+		FROM iot_automation_rules
+		WHERE enabled = TRUE
+		ORDER BY created_at ASC
+	`)
+
+	rows, err := s.db.QueryContext(ctx, query)
+	if err != nil {
+		return nil, fmt.Errorf("list active automation rules: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*AutomationRule
+	for rows.Next() {
+		var r AutomationRule
+		var trDev, trCh, trOp, trVal, trCron sql.NullString
+		err := rows.Scan(
+			&r.ID, &r.UserID, &r.Name, &r.Enabled,
+			&r.TriggerType, &trDev, &trCh, &trOp, &trVal, &trCron,
+			&r.ActionDeviceID, &r.ActionChannelID, &r.ActionValue,
+			&r.CreatedAt, &r.UpdatedAt,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("scan active rule: %w", err)
+		}
+		if trDev.Valid {
+			r.TriggerDeviceID = &trDev.String
+		}
+		if trCh.Valid {
+			r.TriggerChannelID = &trCh.String
+		}
+		if trOp.Valid {
+			r.TriggerOperator = &trOp.String
+		}
+		if trVal.Valid {
+			r.TriggerValue = &trVal.String
+		}
+		if trCron.Valid {
+			r.TriggerCron = &trCron.String
+		}
+		list = append(list, &r)
+	}
+	return list, nil
+}
+
+func (s *Store) UpdateAutomationRule(ctx context.Context, r *AutomationRule) error {
+	r.UpdatedAt = time.Now().Unix()
+
+	query := database.Rebind(s.dialect, `
+		UPDATE iot_automation_rules
+		SET name = ?, enabled = ?,
+		    trigger_type = ?, trigger_device_id = ?, trigger_channel_id = ?, trigger_operator = ?, trigger_value = ?, trigger_cron = ?,
+		    action_device_id = ?, action_channel_id = ?, action_value = ?,
+		    updated_at = ?
+		WHERE id = ? AND user_id = ?
+	`)
+
+	res, err := s.db.ExecContext(ctx, query,
+		r.Name, r.Enabled,
+		r.TriggerType, r.TriggerDeviceID, r.TriggerChannelID, r.TriggerOperator, r.TriggerValue, r.TriggerCron,
+		r.ActionDeviceID, r.ActionChannelID, r.ActionValue,
+		r.UpdatedAt,
+		r.ID, r.UserID,
+	)
+	if err != nil {
+		return fmt.Errorf("update automation rule: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ToggleAutomationRule(ctx context.Context, id, userID string, enabled bool) error {
+	query := database.Rebind(s.dialect, `
+		UPDATE iot_automation_rules
+		SET enabled = ?, updated_at = ?
+		WHERE id = ? AND user_id = ?
+	`)
+
+	res, err := s.db.ExecContext(ctx, query, enabled, time.Now().Unix(), id, userID)
+	if err != nil {
+		return fmt.Errorf("toggle automation rule: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) DeleteAutomationRule(ctx context.Context, id, userID string) error {
+	query := database.Rebind(s.dialect, `
+		DELETE FROM iot_automation_rules
+		WHERE id = ? AND user_id = ?
+	`)
+
+	res, err := s.db.ExecContext(ctx, query, id, userID)
+	if err != nil {
+		return fmt.Errorf("delete automation rule: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}

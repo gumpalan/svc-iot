@@ -36,6 +36,7 @@ type Event struct {
 type StateHub struct {
 	registry  *DeviceRegistry
 	publisher CommandPublisher
+	automation *AutomationEngine
 
 	mu         sync.RWMutex
 	stateCache map[string]map[string]any // deviceID -> channelID -> value
@@ -57,6 +58,12 @@ func (h *StateHub) SetPublisher(pub CommandPublisher) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.publisher = pub
+}
+
+func (h *StateHub) SetAutomationEngine(engine *AutomationEngine) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.automation = engine
 }
 
 // GetDeviceStates mengembalikan semua state terkini untuk satu device
@@ -103,6 +110,14 @@ func (h *StateHub) UpdateState(deviceID, channelID string, value any) {
 		Timestamp: time.Now().Unix(),
 	}
 	h.Broadcast(ev)
+
+	// Evaluasi aturan otomasi
+	h.mu.RLock()
+	auto := h.automation
+	h.mu.RUnlock()
+	if auto != nil {
+		auto.EvaluateStateChange(deviceID, channelID, value)
+	}
 }
 
 // HandleInboundMQTT dipanggil saat ada payload masuk dari topik MQTT yang dilanggani

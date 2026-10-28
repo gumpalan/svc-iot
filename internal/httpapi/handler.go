@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 
@@ -14,9 +15,10 @@ import (
 )
 
 type Handler struct {
-	registry *core.DeviceRegistry
-	hub      *core.StateHub
-	store    *store.Store
+	registry   *core.DeviceRegistry
+	hub        *core.StateHub
+	store      *store.Store
+	automation *core.AutomationEngine
 }
 
 func NewHandler(registry *core.DeviceRegistry, hub *core.StateHub, st *store.Store) *Handler {
@@ -25,6 +27,10 @@ func NewHandler(registry *core.DeviceRegistry, hub *core.StateHub, st *store.Sto
 		hub:      hub,
 		store:    st,
 	}
+}
+
+func (h *Handler) SetAutomationEngine(auto *core.AutomationEngine) {
+	h.automation = auto
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
@@ -52,6 +58,15 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /iot/v1/permissions", h.handleListPermissions)
 	mux.HandleFunc("POST /iot/v1/permissions", h.handleCreatePermission)
 	mux.HandleFunc("DELETE /iot/v1/permissions/{id}", h.handleDeletePermission)
+
+	// Automation Rules
+	mux.HandleFunc("GET /iot/v1/rules", h.handleListRules)
+	mux.HandleFunc("POST /iot/v1/rules", h.handleCreateRule)
+	mux.HandleFunc("GET /iot/v1/rules/{id}", h.handleGetRule)
+	mux.HandleFunc("PUT /iot/v1/rules/{id}", h.handleUpdateRule)
+	mux.HandleFunc("PATCH /iot/v1/rules/{id}/toggle", h.handleToggleRule)
+	mux.HandleFunc("DELETE /iot/v1/rules/{id}", h.handleDeleteRule)
+	mux.HandleFunc("POST /iot/v1/rules/{id}/test", h.handleTestRule)
 }
 
 func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -460,6 +475,240 @@ func (h *Handler) handleDeletePermission(w http.ResponseWriter, r *http.Request)
 
 	w.Header().Set("Content-Type", "application/json")
 	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+// ----------------------------------------------------------------------
+// Automation Rules Handlers
+// ----------------------------------------------------------------------
+
+func (h *Handler) handleListRules(w http.ResponseWriter, r *http.Request) {
+	userID, role := extractUserContext(r)
+	filterUser := userID
+	if role == "admin" && r.URL.Query().Get("all") == "true" {
+		filterUser = ""
+	}
+
+	rules, err := h.store.ListAutomationRules(r.Context(), filterUser)
+	if err != nil {
+		http.Error(w, `{"error":"failed to list automation rules"}`, http.StatusInternalServerError)
+		return
+	}
+	if rules == nil {
+		rules = []*store.AutomationRule{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(rules)
+}
+
+func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
+	userID, _ := extractUserContext(r)
+
+	var req store.AutomationRule
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json body"}`, http.StatusBadRequest)
+		return
+	}
+
+	if req.Name == "" || req.TriggerType == "" || req.ActionDeviceID == "" || req.ActionChannelID == "" {
+		http.Error(w, `{"error":"missing required fields: name, triggerType, actionDeviceId, actionChannelId"}`, http.StatusBadRequest)
+		return
+	}
+
+	b := make([]byte, 6)
+	_, _ = rand.Read(b)
+	req.ID = "rule_" + hex.EncodeToString(b)
+	req.UserID = userID
+
+	if err := h.store.CreateAutomationRule(r.Context(), &req); err != nil {
+		http.Error(w, `{"error":"failed to create automation rule"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if h.automation != nil {
+		_ = h.automation.ReloadRules(r.Context())
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(req)
+}
+
+func (h *Handler) handleGetRule(w http.ResponseWriter, r *http.Request) {
+	userID, role := extractUserContext(r)
+	id := r.PathValue("id")
+
+	rule, err := h.store.GetAutomationRule(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, `{"error":"rule not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, `{"error":"failed to get rule"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if role != "admin" && rule.UserID != userID {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(rule)
+}
+
+func (h *Handler) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
+	userID, role := extractUserContext(r)
+	id := r.PathValue("id")
+
+	existing, err := h.store.GetAutomationRule(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, `{"error":"rule not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, `{"error":"failed to get rule"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if role != "admin" && existing.UserID != userID {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+
+	var req store.AutomationRule
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, `{"error":"invalid json body"}`, http.StatusBadRequest)
+		return
+	}
+
+	req.ID = id
+	req.UserID = existing.UserID // Pertahankan pemilik asli
+
+	if err := h.store.UpdateAutomationRule(r.Context(), &req); err != nil {
+		http.Error(w, `{"error":"failed to update rule"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if h.automation != nil {
+		_ = h.automation.ReloadRules(r.Context())
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(req)
+}
+
+func (h *Handler) handleToggleRule(w http.ResponseWriter, r *http.Request) {
+	userID, role := extractUserContext(r)
+	id := r.PathValue("id")
+
+	existing, err := h.store.GetAutomationRule(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, `{"error":"rule not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, `{"error":"failed to get rule"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if role != "admin" && existing.UserID != userID {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+
+	var body struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		// default flip jika tidak ada payload
+		body.Enabled = !existing.Enabled
+	}
+
+	targetUser := existing.UserID
+	if err := h.store.ToggleAutomationRule(r.Context(), id, targetUser, body.Enabled); err != nil {
+		http.Error(w, `{"error":"failed to toggle rule"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if h.automation != nil {
+		_ = h.automation.ReloadRules(r.Context())
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"id":      id,
+		"enabled": body.Enabled,
+	})
+}
+
+func (h *Handler) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
+	userID, role := extractUserContext(r)
+	id := r.PathValue("id")
+
+	existing, err := h.store.GetAutomationRule(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, `{"error":"rule not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, `{"error":"failed to get rule"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if role != "admin" && existing.UserID != userID {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+
+	if err := h.store.DeleteAutomationRule(r.Context(), id, existing.UserID); err != nil {
+		http.Error(w, `{"error":"failed to delete rule"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if h.automation != nil {
+		_ = h.automation.ReloadRules(r.Context())
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"success":true}`))
+}
+
+func (h *Handler) handleTestRule(w http.ResponseWriter, r *http.Request) {
+	userID, role := extractUserContext(r)
+	id := r.PathValue("id")
+
+	rule, err := h.store.GetAutomationRule(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, `{"error":"rule not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, `{"error":"failed to get rule"}`, http.StatusInternalServerError)
+		return
+	}
+
+	if role != "admin" && rule.UserID != userID {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+
+	// Eksekusi aksi rule secara instan
+	var actionVal any = rule.ActionValue
+	low := strings.ToLower(rule.ActionValue)
+	if low == "true" || low == "on" {
+		actionVal = true
+	} else if low == "false" || low == "off" {
+		actionVal = false
+	}
+
+	if err := h.hub.ExecuteCommand(rule.ActionDeviceID, rule.ActionChannelID, actionVal); err != nil {
+		http.Error(w, fmt.Sprintf(`{"error":"failed to fire action: %v"}`, err), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"success":true,"message":"rule action executed successfully"}`))
 }
 
 func extractUserContext(r *http.Request) (userID, role string) {

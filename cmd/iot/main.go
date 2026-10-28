@@ -68,6 +68,9 @@ func main() {
 		case "device":
 			handleDeviceCLI(registry, args[1:])
 			return
+		case "rule", "automation":
+			handleRuleCLI(st, args[1:])
+			return
 		case "help", "--help", "-h":
 			printUsage()
 			return
@@ -77,8 +80,15 @@ func main() {
 	log.Println("Memulai Gumpalan IoT Service...")
 	log.Printf("Berhasil memuat konfigurasi perangkat dari %s (%d perangkat terdaftar)", devConfigPath, len(devCfg.Devices))
 
-	// 3. Inisialisasi State Hub
+	// 3. Inisialisasi State Hub & Automation Engine
 	hub := core.NewStateHub(registry, nil)
+	autoEngine := core.NewAutomationEngine(st, hub)
+	if err := autoEngine.ReloadRules(context.Background()); err != nil {
+		log.Printf("[Automation] Gagal memuat aturan awal: %v", err)
+	}
+	autoEngine.StartScheduler()
+	defer autoEngine.Stop()
+	hub.SetAutomationEngine(autoEngine)
 
 	// 4. Inisialisasi MQTT client secara asinkron agar tidak memblokir HTTP listener jika broker offline
 	mqttCfg := mqtt.LoadConfig()
@@ -105,6 +115,7 @@ func main() {
 	// 5. Inisialisasi HTTP & WebSocket Router
 	mux := http.NewServeMux()
 	handler := httpapi.NewHandler(registry, hub, st)
+	handler.SetAutomationEngine(autoEngine)
 	handler.RegisterRoutes(mux)
 
 	port := os.Getenv("PORT")
@@ -239,6 +250,101 @@ func handleDeviceCLI(registry *core.DeviceRegistry, args []string) {
 	w.Flush()
 }
 
+func handleRuleCLI(st *store.Store, args []string) {
+	ctx := context.Background()
+	if len(args) == 0 || args[0] == "list" {
+		rules, err := st.ListAutomationRules(ctx, "")
+		if err != nil {
+			log.Fatalf("Gagal mengambil daftar aturan: %v", err)
+		}
+		if len(rules) == 0 {
+			fmt.Println("Belum ada aturan otomasi terdaftar.")
+			return
+		}
+		w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', 0)
+		fmt.Fprintln(w, "ID	NAME	USER	STATUS	TRIGGER	ACTION")
+		for _, r := range rules {
+			status := "OFF"
+			if r.Enabled {
+				status = "ON"
+			}
+			triggerStr := ""
+			if r.TriggerType == "state" {
+				d := ""
+				c := ""
+				op := "=="
+				v := ""
+				if r.TriggerDeviceID != nil {
+					d = *r.TriggerDeviceID
+				}
+				if r.TriggerChannelID != nil {
+					c = *r.TriggerChannelID
+				}
+				if r.TriggerOperator != nil {
+					op = *r.TriggerOperator
+				}
+				if r.TriggerValue != nil {
+					v = *r.TriggerValue
+				}
+				triggerStr = fmt.Sprintf("%s.%s %s %s", d, c, op, v)
+			} else {
+				cronVal := ""
+				if r.TriggerCron != nil {
+					cronVal = *r.TriggerCron
+				}
+				triggerStr = fmt.Sprintf("Schedule (%s)", cronVal)
+			}
+			actionStr := fmt.Sprintf("%s.%s = %s", r.ActionDeviceID, r.ActionChannelID, r.ActionValue)
+			fmt.Fprintf(w, "%s	%s	%s	%s	%s	%s\n", r.ID, r.Name, r.UserID, status, triggerStr, actionStr)
+		}
+		w.Flush()
+		return
+	}
+
+	switch args[0] {
+	case "toggle":
+		if len(args) < 2 {
+			fmt.Println("Penggunaan: iot rule toggle <rule_id> [on|off]")
+			os.Exit(1)
+		}
+		ruleID := args[1]
+		rule, err := st.GetAutomationRule(ctx, ruleID)
+		if err != nil {
+			log.Fatalf("Aturan tidak ditemukan: %v", err)
+		}
+		targetState := !rule.Enabled
+		if len(args) >= 3 {
+			targetState = args[2] == "on" || args[2] == "1" || args[2] == "true"
+		}
+		if err := st.ToggleAutomationRule(ctx, ruleID, rule.UserID, targetState); err != nil {
+			log.Fatalf("Gagal mengubah status aturan: %v", err)
+		}
+		status := "NONAKTIF"
+		if targetState {
+			status = "AKTIF"
+		}
+		fmt.Printf("Aturan %s (%s) sekarang: %s\n", rule.Name, ruleID, status)
+
+	case "delete", "rm":
+		if len(args) < 2 {
+			fmt.Println("Penggunaan: iot rule delete <rule_id>")
+			os.Exit(1)
+		}
+		ruleID := args[1]
+		rule, err := st.GetAutomationRule(ctx, ruleID)
+		if err != nil {
+			log.Fatalf("Aturan tidak ditemukan: %v", err)
+		}
+		if err := st.DeleteAutomationRule(ctx, ruleID, rule.UserID); err != nil {
+			log.Fatalf("Gagal menghapus aturan: %v", err)
+		}
+		fmt.Printf("Aturan %s (%s) berhasil dihapus.\n", rule.Name, ruleID)
+
+	default:
+		printUsage()
+	}
+}
+
 func printUsage() {
 	fmt.Println("Gumpalan IoT CLI")
 	fmt.Println("\nPenggunaan:")
@@ -246,4 +352,7 @@ func printUsage() {
 	fmt.Println("  iot perm grant <device_id> <target> [--role] [--readonly]  Beri izin akses ke user atau role")
 	fmt.Println("  iot perm revoke <perm_id>                           Cabut izin akses")
 	fmt.Println("  iot device list                                     Tampilkan perangkat terdaftar dari config")
+	fmt.Println("  iot rule list                                       Tampilkan daftar aturan otomasi")
+	fmt.Println("  iot rule toggle <rule_id> [on|off]                  Aktifkan/nonaktifkan aturan")
+	fmt.Println("  iot rule delete <rule_id>                           Hapus aturan otomasi")
 }
