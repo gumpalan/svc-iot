@@ -47,6 +47,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PUT /iot/v1/dashboards/{id}", h.handleUpdateDashboard)
 	mux.HandleFunc("DELETE /iot/v1/dashboards/{id}", h.handleDeleteDashboard)
 	mux.HandleFunc("POST /iot/v1/dashboards/{id}/clone", h.handleCloneDashboard)
+
+	// Device Permissions (Admin only)
+	mux.HandleFunc("GET /iot/v1/permissions", h.handleListPermissions)
+	mux.HandleFunc("POST /iot/v1/permissions", h.handleCreatePermission)
+	mux.HandleFunc("DELETE /iot/v1/permissions/{id}", h.handleDeletePermission)
 }
 
 func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -362,6 +367,99 @@ func (h *Handler) handleCloneDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(clone)
+}
+
+func (h *Handler) handleListPermissions(w http.ResponseWriter, r *http.Request) {
+	_, role := extractUserContext(r)
+	if role != "admin" {
+		http.Error(w, `{"error":"forbidden: admin only"}`, http.StatusForbidden)
+		return
+	}
+	deviceID := r.URL.Query().Get("deviceId")
+	list, err := h.store.ListPermissions(r.Context(), deviceID)
+	if err != nil {
+		http.Error(w, `{"error":"failed to list permissions"}`, http.StatusInternalServerError)
+		return
+	}
+	if list == nil {
+		list = []*store.DevicePermission{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(list)
+}
+
+type createPermRequest struct {
+	DeviceID string  `json:"deviceId"`
+	RoleID   *string `json:"roleId,omitempty"`
+	UserID   *string `json:"userId,omitempty"`
+	CanRead  *bool   `json:"canRead,omitempty"`
+	CanWrite *bool   `json:"canWrite,omitempty"`
+}
+
+func (h *Handler) handleCreatePermission(w http.ResponseWriter, r *http.Request) {
+	_, role := extractUserContext(r)
+	if role != "admin" {
+		http.Error(w, `{"error":"forbidden: admin only"}`, http.StatusForbidden)
+		return
+	}
+
+	var req createPermRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.DeviceID == "" {
+		http.Error(w, `{"error":"deviceId is required"}`, http.StatusBadRequest)
+		return
+	}
+
+	canRead := true
+	if req.CanRead != nil {
+		canRead = *req.CanRead
+	}
+	canWrite := true
+	if req.CanWrite != nil {
+		canWrite = *req.CanWrite
+	}
+
+	b := make([]byte, 6)
+	_, _ = rand.Read(b)
+	permID := "perm_" + hex.EncodeToString(b)
+
+	p := &store.DevicePermission{
+		ID:       permID,
+		DeviceID: req.DeviceID,
+		RoleID:   req.RoleID,
+		UserID:   req.UserID,
+		CanRead:  canRead,
+		CanWrite: canWrite,
+	}
+
+	if err := h.store.CreatePermission(r.Context(), p); err != nil {
+		http.Error(w, `{"error":"failed to create permission"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(p)
+}
+
+func (h *Handler) handleDeletePermission(w http.ResponseWriter, r *http.Request) {
+	_, role := extractUserContext(r)
+	if role != "admin" {
+		http.Error(w, `{"error":"forbidden: admin only"}`, http.StatusForbidden)
+		return
+	}
+
+	id := r.PathValue("id")
+	if err := h.store.DeletePermission(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			http.Error(w, `{"error":"permission not found"}`, http.StatusNotFound)
+			return
+		}
+		http.Error(w, `{"error":"failed to delete permission"}`, http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write([]byte(`{"success":true}`))
 }
 
 func extractUserContext(r *http.Request) (userID, role string) {

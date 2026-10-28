@@ -130,6 +130,32 @@ Semua endpoint modul berada di bawah prefix `/iot/v1/`:
 | `DELETE`| `/iot/v1/dashboards/{id}` | Hapus layout dashboard |
 | `GET` | `/iot/v1/dashboards/explore` | Jelajahi layout publik pengguna lain (terfilter perangkat yang sama) |
 | `POST` | `/iot/v1/dashboards/{id}/clone` | Kloning layout dashboard publik ke akun pengguna aktif |
+| `GET` | `/iot/v1/permissions` | Daftar izin akses perangkat (admin only, filter `?deviceId=...`) |
+| `POST` | `/iot/v1/permissions` | Buat izin akses baru untuk role/user (admin only) |
+| `DELETE`| `/iot/v1/permissions/{id}` | Cabut izin akses perangkat (admin only) |
+
+## Perintah CLI Administrasi
+
+Perintah CLI `iot` dapat dijalankan langsung melalui binary hasil compile atau `go run ./cmd/iot`:
+
+```bash
+# 1. Tampilkan daftar perangkat terdaftar dari konfigurasi YAML
+go run ./cmd/iot device list
+
+# 2. Tampilkan semua izin perangkat yang tersimpan di database
+go run ./cmd/iot perm list
+go run ./cmd/iot perm list living-room-sensor
+
+# 3. Beri izin akses ke user atau role tertentu
+go run ./cmd/iot perm grant living-room-sensor role_user --role
+go run ./cmd/iot perm grant living-room-sensor usr_123456
+go run ./cmd/iot perm grant living-room-sensor usr_123456 --readonly
+
+# 4. Cabut izin akses
+go run ./cmd/iot perm revoke perm_4879dad00e24
+```
+
+> **Catatan Akses:** Jika suatu perangkat belum memiliki baris izin di database, maka perangkat tersebut dapat diakses oleh semua pengguna terautentikasi (default terbuka). Setelah ada satu atau lebih izin, hanya user atau role yang terdaftar (atau role `admin`) yang dapat melihat dan mengontrol perangkat tersebut.
 
 ## Lisensi dan Dependensi
 

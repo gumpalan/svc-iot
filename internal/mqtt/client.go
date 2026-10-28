@@ -60,6 +60,7 @@ func NewClient(cfg Config, handler InboundMessageHandler) (*Client, error) {
 	opts.SetPingTimeout(10 * time.Second)
 	opts.SetConnectRetry(true)
 	opts.SetConnectRetryInterval(5 * time.Second)
+	opts.SetConnectTimeout(3 * time.Second)
 
 	c := &Client{
 		handler: handler,

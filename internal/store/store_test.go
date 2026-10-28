@@ -132,4 +132,34 @@ func TestCheckDeviceAccess(t *testing.T) {
 	if allowed {
 		t.Errorf("stranger should not be allowed")
 	}
+
+	// 3. Test CreatePermission, ListPermissions, DeletePermission
+	roleID := "role_family"
+	p := &DevicePermission{
+		ID:        "perm_test_1",
+		DeviceID:  "device_lamp",
+		RoleID:    &roleID,
+		CanRead:   true,
+		CanWrite:  true,
+	}
+	if err := s.CreatePermission(ctx, p); err != nil {
+		t.Fatalf("CreatePermission failed: %v", err)
+	}
+
+	perms, err := s.ListPermissions(ctx, "device_lamp")
+	if err != nil || len(perms) != 1 {
+		t.Fatalf("ListPermissions expected 1 perm, got %d (err: %v)", len(perms), err)
+	}
+	if *perms[0].RoleID != "role_family" {
+		t.Errorf("expected role_family, got %v", perms[0].RoleID)
+	}
+
+	if err := s.DeletePermission(ctx, "perm_test_1"); err != nil {
+		t.Fatalf("DeletePermission failed: %v", err)
+	}
+
+	permsAfter, err := s.ListPermissions(ctx, "device_lamp")
+	if err != nil || len(permsAfter) != 0 {
+		t.Fatalf("expected 0 perms after delete, got %d", len(permsAfter))
+	}
 }

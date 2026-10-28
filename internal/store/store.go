@@ -240,3 +240,75 @@ func (s *Store) CheckDeviceAccess(ctx context.Context, deviceID, userID, role st
 
 	return false, nil
 }
+
+func (s *Store) CreatePermission(ctx context.Context, p *DevicePermission) error {
+	p.CreatedAt = time.Now().Unix()
+	query := database.Rebind(s.dialect, `
+		INSERT INTO iot_device_permissions (id, device_id, role_id, user_id, can_read, can_write, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)
+	`)
+	_, err := s.db.ExecContext(ctx, query, p.ID, p.DeviceID, p.RoleID, p.UserID, p.CanRead, p.CanWrite, p.CreatedAt)
+	if err != nil {
+		return fmt.Errorf("create permission: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListPermissions(ctx context.Context, deviceID string) ([]*DevicePermission, error) {
+	var query string
+	var args []any
+	if deviceID != "" {
+		query = database.Rebind(s.dialect, `
+			SELECT id, device_id, role_id, user_id, can_read, can_write, created_at
+			FROM iot_device_permissions
+			WHERE device_id = ?
+			ORDER BY created_at DESC
+		`)
+		args = append(args, deviceID)
+	} else {
+		query = database.Rebind(s.dialect, `
+			SELECT id, device_id, role_id, user_id, can_read, can_write, created_at
+			FROM iot_device_permissions
+			ORDER BY created_at DESC
+		`)
+	}
+
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list permissions: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*DevicePermission
+	for rows.Next() {
+		var p DevicePermission
+		var roleID, userID sql.NullString
+		if err := rows.Scan(&p.ID, &p.DeviceID, &roleID, &userID, &p.CanRead, &p.CanWrite, &p.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scan permission: %w", err)
+		}
+		if roleID.Valid {
+			p.RoleID = &roleID.String
+		}
+		if userID.Valid {
+			p.UserID = &userID.String
+		}
+		list = append(list, &p)
+	}
+	return list, nil
+}
+
+func (s *Store) DeletePermission(ctx context.Context, id string) error {
+	query := database.Rebind(s.dialect, `
+		DELETE FROM iot_device_permissions
+		WHERE id = ?
+	`)
+	res, err := s.db.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("delete permission: %w", err)
+	}
+	affected, _ := res.RowsAffected()
+	if affected == 0 {
+		return ErrNotFound
+	}
+	return nil
+}
