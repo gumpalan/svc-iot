@@ -34,8 +34,8 @@ type Event struct {
 }
 
 type StateHub struct {
-	registry  *DeviceRegistry
-	publisher CommandPublisher
+	registry   *DeviceRegistry
+	publisher  CommandPublisher
 	automation *AutomationEngine
 
 	mu         sync.RWMutex
@@ -122,12 +122,14 @@ func (h *StateHub) UpdateState(deviceID, channelID string, value any) {
 
 // HandleInboundMQTT dipanggil saat ada payload masuk dari topik MQTT yang dilanggani
 func (h *StateHub) HandleInboundMQTT(topic string, payload []byte) {
+	rawStr := strings.TrimSpace(string(payload))
+	log.Printf("[MQTT Inbound] Topik: %s, Payload: %s", topic, rawStr)
+
 	dev, ch, found := h.registry.FindChannelByStateTopic(topic)
 	if !found {
 		return
 	}
 
-	rawStr := strings.TrimSpace(string(payload))
 	var parsedVal any = rawStr
 
 	switch ch.Type {
@@ -139,8 +141,14 @@ func (h *StateHub) HandleInboundMQTT(topic string, payload []byte) {
 			parsedVal = false
 		}
 	case config.DataTypeNumber:
-		if num, err := strconv.ParseFloat(rawStr, 64); err == nil {
+		// Sanitasi karakter satuan jika ada, misal "24.0 C" atau "40.0 %"
+		cleaned := strings.TrimRight(rawStr, " °Cc%Ff")
+		if num, err := strconv.ParseFloat(cleaned, 64); err == nil {
 			parsedVal = num
+		} else if num, err := strconv.ParseFloat(rawStr, 64); err == nil {
+			parsedVal = num
+		} else {
+			log.Printf("[MQTT Inbound] Gagal parse angka pada channel %s.%s: %s (%v)", dev.ID, ch.ID, rawStr, err)
 		}
 	}
 
@@ -176,6 +184,37 @@ func (h *StateHub) ExecuteCommand(deviceID, channelID string, value any) error {
 	}
 	if cmdTopic == "" {
 		return fmt.Errorf("channel '%s' has no command topic defined", channelID)
+	}
+
+	// Normalisasi dan konversi nilai jika tipe channel boolean
+	if targetChannel.Type == config.DataTypeBoolean {
+		switch v := value.(type) {
+		case string:
+			low := strings.ToLower(strings.TrimSpace(v))
+			if low == "press" || low == "toggle" {
+				// Toggle berdasarkan state terkini
+				currState := false
+				h.mu.RLock()
+				if m, ok := h.stateCache[deviceID]; ok {
+					if b, ok := m[channelID].(bool); ok {
+						currState = b
+					} else if s, ok := m[channelID].(string); ok {
+						sLow := strings.ToLower(s)
+						currState = (sLow == "1" || sLow == "true" || sLow == "on")
+					}
+				}
+				h.mu.RUnlock()
+				value = !currState
+			} else if low == "1" || low == "true" || low == "on" {
+				value = true
+			} else if low == "0" || low == "false" || low == "off" {
+				value = false
+			}
+		case int:
+			value = (v != 0)
+		case float64:
+			value = (v != 0)
+		}
 	}
 
 	// Format payload sesuai tipe data dan driver bawaan
@@ -214,6 +253,7 @@ func (h *StateHub) ExecuteCommand(deviceID, channelID string, value any) error {
 		if err := pub.PublishCommand(cmdTopic, payload); err != nil {
 			return fmt.Errorf("mqtt publish failed: %w", err)
 		}
+		log.Printf("[MQTT Command] Publish ke %s: %s (value: %v)", cmdTopic, string(payload), value)
 	}
 
 	// Perbarui state lokal seketika

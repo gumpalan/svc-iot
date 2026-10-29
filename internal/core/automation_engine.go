@@ -24,9 +24,9 @@ type AutomationEngine struct {
 	store    AutomationStore
 	executor CommandExecutor
 
-	mu         sync.RWMutex
-	rules      []*store.AutomationRule
-	lastFired  map[string]int64 // ruleID -> timestamp detik terakhir dieksekusi
+	mu        sync.RWMutex
+	rules     []*store.AutomationRule
+	lastFired map[string]int64 // ruleID -> timestamp detik terakhir dieksekusi
 
 	stopCh chan struct{}
 }

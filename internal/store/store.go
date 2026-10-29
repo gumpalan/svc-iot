@@ -502,6 +502,68 @@ func (s *Store) ListActiveAutomationRules(ctx context.Context) ([]*AutomationRul
 	return list, nil
 }
 
+// FindConflictingRule memeriksa apakah sudah ada aturan aktif lain yang memiliki
+// pemicu dan target perangkat yang sama (mencegah flapping dan duplikasi).
+func (s *Store) FindConflictingRule(ctx context.Context, r *AutomationRule) (*AutomationRule, error) {
+	rules, err := s.ListActiveAutomationRules(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, existing := range rules {
+		if existing.ID == r.ID {
+			continue
+		}
+		if existing.TriggerType != r.TriggerType {
+			continue
+		}
+		if existing.ActionDeviceID != r.ActionDeviceID || existing.ActionChannelID != r.ActionChannelID {
+			continue
+		}
+
+		if r.TriggerType == "schedule" {
+			cron1 := ""
+			if r.TriggerCron != nil {
+				cron1 = *r.TriggerCron
+			}
+			cron2 := ""
+			if existing.TriggerCron != nil {
+				cron2 = *existing.TriggerCron
+			}
+			if cron1 != "" && cron1 == cron2 {
+				return existing, nil
+			}
+		} else if r.TriggerType == "state" {
+			d1, c1, op1 := "", "", ""
+			if r.TriggerDeviceID != nil {
+				d1 = *r.TriggerDeviceID
+			}
+			if r.TriggerChannelID != nil {
+				c1 = *r.TriggerChannelID
+			}
+			if r.TriggerOperator != nil {
+				op1 = *r.TriggerOperator
+			}
+
+			d2, c2, op2 := "", "", ""
+			if existing.TriggerDeviceID != nil {
+				d2 = *existing.TriggerDeviceID
+			}
+			if existing.TriggerChannelID != nil {
+				c2 = *existing.TriggerChannelID
+			}
+			if existing.TriggerOperator != nil {
+				op2 = *existing.TriggerOperator
+			}
+
+			if d1 != "" && d1 == d2 && c1 == c2 && op1 == op2 {
+				return existing, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
 func (s *Store) UpdateAutomationRule(ctx context.Context, r *AutomationRule) error {
 	r.UpdatedAt = time.Now().Unix()
 

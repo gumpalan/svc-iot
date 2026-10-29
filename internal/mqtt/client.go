@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	paho "github.com/eclipse/paho.mqtt.golang"
@@ -44,6 +45,10 @@ type InboundMessageHandler func(topic string, payload []byte)
 type Client struct {
 	pahoClient paho.Client
 	handler    InboundMessageHandler
+	cfg        Config
+
+	mu     sync.Mutex
+	topics []string
 }
 
 func NewClient(cfg Config, handler InboundMessageHandler) (*Client, error) {
@@ -64,6 +69,7 @@ func NewClient(cfg Config, handler InboundMessageHandler) (*Client, error) {
 
 	c := &Client{
 		handler: handler,
+		cfg:     cfg,
 	}
 
 	opts.SetDefaultPublishHandler(func(client paho.Client, msg paho.Message) {
@@ -74,6 +80,18 @@ func NewClient(cfg Config, handler InboundMessageHandler) (*Client, error) {
 
 	opts.SetOnConnectHandler(func(client paho.Client) {
 		log.Printf("[MQTT] Terhubung ke broker %s", cfg.Broker)
+		c.mu.Lock()
+		subList := make([]string, len(c.topics))
+		copy(subList, c.topics)
+		c.mu.Unlock()
+
+		if len(subList) > 0 {
+			if err := c.subscribeMultiple(subList); err != nil {
+				log.Printf("[MQTT] Gagal resubscribe ke topik: %v", err)
+			} else {
+				log.Printf("[MQTT] Berhasil resubscribe ke %d topik", len(subList))
+			}
+		}
 	})
 
 	opts.SetConnectionLostHandler(func(client paho.Client, err error) {
@@ -91,6 +109,14 @@ func NewClient(cfg Config, handler InboundMessageHandler) (*Client, error) {
 }
 
 func (c *Client) SubscribeTopics(topics []string) error {
+	c.mu.Lock()
+	c.topics = topics
+	c.mu.Unlock()
+
+	return c.subscribeMultiple(topics)
+}
+
+func (c *Client) subscribeMultiple(topics []string) error {
 	if len(topics) == 0 {
 		return nil
 	}

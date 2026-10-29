@@ -483,12 +483,10 @@ func (h *Handler) handleDeletePermission(w http.ResponseWriter, r *http.Request)
 
 func (h *Handler) handleListRules(w http.ResponseWriter, r *http.Request) {
 	userID, role := extractUserContext(r)
-	filterUser := userID
-	if role == "admin" && r.URL.Query().Get("all") == "true" {
-		filterUser = ""
-	}
+	ctx := r.Context()
 
-	rules, err := h.store.ListAutomationRules(r.Context(), filterUser)
+	// Ambil semua aturan untuk transparansi bersama (shared device visibility)
+	rules, err := h.store.ListAutomationRules(ctx, "")
 	if err != nil {
 		http.Error(w, `{"error":"failed to list automation rules"}`, http.StatusInternalServerError)
 		return
@@ -497,8 +495,25 @@ func (h *Handler) handleListRules(w http.ResponseWriter, r *http.Request) {
 		rules = []*store.AutomationRule{}
 	}
 
+	// Filter aturan: pengguna hanya melihat aturan yang perangkat pemicu atau aksinya boleh dibaca olehnya
+	filtered := make([]*store.AutomationRule, 0, len(rules))
+	for _, rule := range rules {
+		if h.store != nil {
+			allowedAction, _ := h.store.CheckDeviceAccess(ctx, rule.ActionDeviceID, userID, role, false)
+			allowedTrigger := true
+			if rule.TriggerDeviceID != nil && *rule.TriggerDeviceID != "" {
+				allowedTrigger, _ = h.store.CheckDeviceAccess(ctx, *rule.TriggerDeviceID, userID, role, false)
+			}
+			if !allowedAction || !allowedTrigger {
+				continue
+			}
+		}
+		rule.IsOwner = (rule.UserID == userID) || (role == "admin")
+		filtered = append(filtered, rule)
+	}
+
 	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(rules)
+	_ = json.NewEncoder(w).Encode(filtered)
 }
 
 func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
@@ -520,6 +535,18 @@ func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 	req.ID = "rule_" + hex.EncodeToString(b)
 	req.UserID = userID
 
+	// Cegah duplikasi atau konflik aturan yang aktif
+	if req.Enabled {
+		if conflicting, err := h.store.FindConflictingRule(r.Context(), &req); err == nil && conflicting != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("Konflik aturan: pemicu dan target aksi perangkat ini sudah aktif pada '%s'", conflicting.Name),
+			})
+			return
+		}
+	}
+
 	if err := h.store.CreateAutomationRule(r.Context(), &req); err != nil {
 		http.Error(w, `{"error":"failed to create automation rule"}`, http.StatusInternalServerError)
 		return
@@ -529,6 +556,7 @@ func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		_ = h.automation.ReloadRules(r.Context())
 	}
 
+	req.IsOwner = true
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	_ = json.NewEncoder(w).Encode(req)
@@ -537,8 +565,9 @@ func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleGetRule(w http.ResponseWriter, r *http.Request) {
 	userID, role := extractUserContext(r)
 	id := r.PathValue("id")
+	ctx := r.Context()
 
-	rule, err := h.store.GetAutomationRule(r.Context(), id)
+	rule, err := h.store.GetAutomationRule(ctx, id)
 	if err != nil {
 		if errors.Is(err, store.ErrNotFound) {
 			http.Error(w, `{"error":"rule not found"}`, http.StatusNotFound)
@@ -548,11 +577,16 @@ func (h *Handler) handleGetRule(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if role != "admin" && rule.UserID != userID {
-		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
-		return
+	// Cek akses perangkat
+	if h.store != nil {
+		allowedAction, _ := h.store.CheckDeviceAccess(ctx, rule.ActionDeviceID, userID, role, false)
+		if !allowedAction {
+			http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+			return
+		}
 	}
 
+	rule.IsOwner = (rule.UserID == userID) || (role == "admin")
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(rule)
 }
@@ -572,7 +606,7 @@ func (h *Handler) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if role != "admin" && existing.UserID != userID {
-		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: hanya pembuat atau admin yang dapat mengubah aturan ini"}`, http.StatusForbidden)
 		return
 	}
 
@@ -585,6 +619,18 @@ func (h *Handler) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	req.ID = id
 	req.UserID = existing.UserID // Pertahankan pemilik asli
 
+	// Cegah duplikasi atau konflik aturan yang aktif
+	if req.Enabled {
+		if conflicting, err := h.store.FindConflictingRule(r.Context(), &req); err == nil && conflicting != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("Konflik aturan: pemicu dan target aksi perangkat ini sudah aktif pada '%s'", conflicting.Name),
+			})
+			return
+		}
+	}
+
 	if err := h.store.UpdateAutomationRule(r.Context(), &req); err != nil {
 		http.Error(w, `{"error":"failed to update rule"}`, http.StatusInternalServerError)
 		return
@@ -594,6 +640,7 @@ func (h *Handler) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		_ = h.automation.ReloadRules(r.Context())
 	}
 
+	req.IsOwner = true
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(req)
 }
@@ -613,7 +660,7 @@ func (h *Handler) handleToggleRule(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if role != "admin" && existing.UserID != userID {
-		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		http.Error(w, `{"error":"forbidden: hanya pembuat atau admin yang dapat mengubah status aturan ini"}`, http.StatusForbidden)
 		return
 	}
 
@@ -623,6 +670,18 @@ func (h *Handler) handleToggleRule(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		// default flip jika tidak ada payload
 		body.Enabled = !existing.Enabled
+	}
+
+	// Jika diaktifkan, cek apakah ada aturan lain yang sudah aktif dan bentrok
+	if body.Enabled {
+		if conflicting, err := h.store.FindConflictingRule(r.Context(), existing); err == nil && conflicting != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"error": fmt.Sprintf("Gagal mengaktifkan: aturan serupa sudah aktif pada '%s'", conflicting.Name),
+			})
+			return
+		}
 	}
 
 	targetUser := existing.UserID

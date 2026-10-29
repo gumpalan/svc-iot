@@ -136,11 +136,11 @@ func TestCheckDeviceAccess(t *testing.T) {
 	// 3. Test CreatePermission, ListPermissions, DeletePermission
 	roleID := "role_family"
 	p := &DevicePermission{
-		ID:        "perm_test_1",
-		DeviceID:  "device_lamp",
-		RoleID:    &roleID,
-		CanRead:   true,
-		CanWrite:  true,
+		ID:       "perm_test_1",
+		DeviceID: "device_lamp",
+		RoleID:   &roleID,
+		CanRead:  true,
+		CanWrite: true,
 	}
 	if err := s.CreatePermission(ctx, p); err != nil {
 		t.Fatalf("CreatePermission failed: %v", err)
