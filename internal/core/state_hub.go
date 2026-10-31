@@ -1,6 +1,9 @@
 package core
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -12,6 +15,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/gumpalan/svc-iot/internal/config"
+	"github.com/gumpalan/svc-iot/internal/store"
 )
 
 var upgrader = websocket.Upgrader{
@@ -37,6 +41,8 @@ type StateHub struct {
 	registry   *DeviceRegistry
 	publisher  CommandPublisher
 	automation *AutomationEngine
+	store      *store.Store
+	historyCfg config.HistoryConfig
 
 	mu         sync.RWMutex
 	stateCache map[string]map[string]any // deviceID -> channelID -> value
@@ -52,6 +58,13 @@ func NewStateHub(registry *DeviceRegistry, pub CommandPublisher) *StateHub {
 		stateCache: make(map[string]map[string]any),
 		clients:    make(map[*websocket.Conn]bool),
 	}
+}
+
+func (h *StateHub) SetHistoryStore(st *store.Store, cfg config.HistoryConfig) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.store = st
+	h.historyCfg = cfg
 }
 
 func (h *StateHub) SetPublisher(pub CommandPublisher) {
@@ -153,10 +166,37 @@ func (h *StateHub) HandleInboundMQTT(topic string, payload []byte) {
 	}
 
 	h.UpdateState(dev.ID, ch.ID, parsedVal)
+
+	// Catat ke sensor_logs jika channel bersifat input dan history sensor aktif
+	h.mu.RLock()
+	st := h.store
+	hcfg := h.historyCfg
+	h.mu.RUnlock()
+	if st != nil && hcfg.LogSensor() && ch.Direction == config.DirectionInput {
+		go func(deviceID, channelID, val string) {
+			l := &store.SensorLog{
+				ID:         newLogID(),
+				DeviceID:   deviceID,
+				ChannelID:  channelID,
+				Value:      val,
+				RecordedAt: time.Now().Unix(),
+			}
+			if err := st.CreateSensorLog(context.Background(), l); err != nil {
+				log.Printf("[History] Gagal menyimpan sensor log: %v", err)
+			}
+		}(dev.ID, ch.ID, fmt.Sprintf("%v", parsedVal))
+	}
 }
 
-// ExecuteCommand memproses perintah ke perangkat dan meneruskan ke MQTT broker
+// ExecuteCommand memproses perintah ke perangkat dan meneruskan ke MQTT broker.
+// Untuk mencatat log aktuator, gunakan ExecuteCommandFrom.
 func (h *StateHub) ExecuteCommand(deviceID, channelID string, value any) error {
+	return h.ExecuteCommandFrom(deviceID, channelID, value, nil)
+}
+
+// ExecuteCommandFrom sama dengan ExecuteCommand tetapi juga mencatat ke actuator_logs
+// jika logEntry tidak nil dan history aktuator aktif di konfigurasi.
+func (h *StateHub) ExecuteCommandFrom(deviceID, channelID string, value any, logEntry *store.ActuatorLog) error {
 	dev, ok := h.registry.GetDevice(deviceID)
 	if !ok {
 		return fmt.Errorf("device '%s' not found", deviceID)
@@ -247,6 +287,8 @@ func (h *StateHub) ExecuteCommand(deviceID, channelID string, value any) error {
 	// Terbitkan ke MQTT jika publisher tersedia
 	h.mu.RLock()
 	pub := h.publisher
+	st := h.store
+	hcfg := h.historyCfg
 	h.mu.RUnlock()
 
 	if pub != nil {
@@ -258,7 +300,29 @@ func (h *StateHub) ExecuteCommand(deviceID, channelID string, value any) error {
 
 	// Perbarui state lokal seketika
 	h.UpdateState(deviceID, channelID, value)
+
+	// Catat ke actuator_logs jika diminta dan history aktuator aktif
+	if st != nil && hcfg.LogActuator() && logEntry != nil {
+		logEntry.ID = newLogID()
+		logEntry.DeviceID = deviceID
+		logEntry.ChannelID = channelID
+		logEntry.Value = fmt.Sprintf("%v", value)
+		logEntry.RecordedAt = time.Now().Unix()
+		go func(l *store.ActuatorLog) {
+			if err := st.CreateActuatorLog(context.Background(), l); err != nil {
+				log.Printf("[History] Gagal menyimpan actuator log: %v", err)
+			}
+		}(logEntry)
+	}
+
 	return nil
+}
+
+// newLogID menghasilkan ID unik untuk entri log historis.
+func newLogID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return "log_" + hex.EncodeToString(b)
 }
 
 // Broadcast mengirim event ke seluruh koneksi WebSocket yang aktif
@@ -327,16 +391,26 @@ func (h *StateHub) HandleWebSocket(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if msg.Type == "command" {
-				if err := h.ExecuteCommand(msg.DeviceID, msg.ChannelID, msg.Value); err != nil {
-					_ = conn.WriteJSON(Event{
-						Type:      "error",
-						DeviceID:  msg.DeviceID,
-						ChannelID: msg.ChannelID,
-						Value:     err.Error(),
-						Timestamp: time.Now().Unix(),
-					})
-				}
-			}
+						// WS command: actor_id tidak tersedia karena tidak ada user context di WS frame.
+						// Log dicatat sebagai source=app dengan actor_id nil.
+						h.mu.RLock()
+						st := h.store
+						hcfg := h.historyCfg
+						h.mu.RUnlock()
+						var logEntry *store.ActuatorLog
+						if st != nil && hcfg.LogActuator() {
+							logEntry = &store.ActuatorLog{Source: "app"}
+						}
+						if err := h.ExecuteCommandFrom(msg.DeviceID, msg.ChannelID, msg.Value, logEntry); err != nil {
+							_ = conn.WriteJSON(Event{
+								Type:      "error",
+								DeviceID:  msg.DeviceID,
+								ChannelID: msg.ChannelID,
+								Value:     err.Error(),
+								Timestamp: time.Now().Unix(),
+							})
+						}
+					}
 		}
 	}()
 }

@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/gumpalan/svc-iot/internal/config"
 	"github.com/gumpalan/svc-iot/internal/core"
@@ -15,10 +17,11 @@ import (
 )
 
 type Handler struct {
-	registry   *core.DeviceRegistry
-	hub        *core.StateHub
-	store      *store.Store
-	automation *core.AutomationEngine
+	registry    *core.DeviceRegistry
+	hub         *core.StateHub
+	store       *store.Store
+	automation  *core.AutomationEngine
+	historyCfg  config.HistoryConfig
 }
 
 func NewHandler(registry *core.DeviceRegistry, hub *core.StateHub, st *store.Store) *Handler {
@@ -31,6 +34,10 @@ func NewHandler(registry *core.DeviceRegistry, hub *core.StateHub, st *store.Sto
 
 func (h *Handler) SetAutomationEngine(auto *core.AutomationEngine) {
 	h.automation = auto
+}
+
+func (h *Handler) SetHistoryConfig(cfg config.HistoryConfig) {
+	h.historyCfg = cfg
 }
 
 func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
@@ -67,6 +74,11 @@ func (h *Handler) RegisterRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /iot/v1/rules/{id}/toggle", h.handleToggleRule)
 	mux.HandleFunc("DELETE /iot/v1/rules/{id}", h.handleDeleteRule)
 	mux.HandleFunc("POST /iot/v1/rules/{id}/test", h.handleTestRule)
+
+	// History
+	mux.HandleFunc("GET /iot/v1/history/capabilities", h.handleHistoryCapabilities)
+	mux.HandleFunc("GET /iot/v1/devices/{id}/history/sensor", h.handleSensorHistory)
+	mux.HandleFunc("GET /iot/v1/devices/{id}/history/actuator", h.handleActuatorHistory)
 }
 
 func (h *Handler) handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -163,7 +175,11 @@ func (h *Handler) handleDeviceCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.hub.ExecuteCommand(id, channelID, req.Value); err != nil {
+	if err := h.hub.ExecuteCommandFrom(id, channelID, req.Value, &store.ActuatorLog{
+		Source:    "app",
+		ActorID:   &userID,
+		ActorName: &userID, // svc-auth belum expose name; fallback ke ID
+	}); err != nil {
 		http.Error(w, `{"error":"`+err.Error()+`"}`, http.StatusBadRequest)
 		return
 	}
@@ -780,4 +796,108 @@ func extractUserContext(r *http.Request) (userID, role string) {
 		role = "user"
 	}
 	return userID, role
+}
+
+// ----------------------------------------------------------------------
+// History Handlers
+// ----------------------------------------------------------------------
+
+// handleHistoryCapabilities mengembalikan fitur history apa saja yang aktif di server ini.
+// Digunakan Flutter untuk menampilkan/menyembunyikan tab chart secara kondisional.
+func (h *Handler) handleHistoryCapabilities(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"enabled":  h.historyCfg.Enabled(),
+		"sensor":   h.historyCfg.LogSensor(),
+		"actuator": h.historyCfg.LogActuator(),
+	})
+}
+
+// parseHistoryQuery membaca query param umum: channel, from, to, limit.
+func parseHistoryQuery(r *http.Request, deviceID string) store.HistoryQuery {
+	q := store.HistoryQuery{DeviceID: deviceID}
+	params := r.URL.Query()
+	q.ChannelID = params.Get("channel")
+	if v := params.Get("from"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			q.From = n
+		}
+	}
+	if v := params.Get("to"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			q.To = n
+		}
+	}
+	if v := params.Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			q.Limit = n
+		}
+	}
+	// Default: 24 jam terakhir jika from dan to keduanya kosong
+	if q.From == 0 && q.To == 0 {
+		q.From = time.Now().Add(-24 * time.Hour).Unix()
+	}
+	return q
+}
+
+func (h *Handler) handleSensorHistory(w http.ResponseWriter, r *http.Request) {
+	if !h.historyCfg.LogSensor() {
+		http.Error(w, `{"error":"sensor history not enabled"}`, http.StatusNotFound)
+		return
+	}
+	if h.store == nil {
+		http.Error(w, `{"error":"store not initialized"}`, http.StatusInternalServerError)
+		return
+	}
+
+	id := r.PathValue("id")
+	userID, role := extractUserContext(r)
+	allowed, err := h.store.CheckDeviceAccess(r.Context(), id, userID, role, false)
+	if err != nil || !allowed {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+
+	q := parseHistoryQuery(r, id)
+	logs, err := h.store.ListSensorLogs(r.Context(), q)
+	if err != nil {
+		http.Error(w, `{"error":"failed to fetch sensor history"}`, http.StatusInternalServerError)
+		return
+	}
+	if logs == nil {
+		logs = []*store.SensorLog{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(logs)
+}
+
+func (h *Handler) handleActuatorHistory(w http.ResponseWriter, r *http.Request) {
+	if !h.historyCfg.LogActuator() {
+		http.Error(w, `{"error":"actuator history not enabled"}`, http.StatusNotFound)
+		return
+	}
+	if h.store == nil {
+		http.Error(w, `{"error":"store not initialized"}`, http.StatusInternalServerError)
+		return
+	}
+
+	id := r.PathValue("id")
+	userID, role := extractUserContext(r)
+	allowed, err := h.store.CheckDeviceAccess(r.Context(), id, userID, role, false)
+	if err != nil || !allowed {
+		http.Error(w, `{"error":"forbidden"}`, http.StatusForbidden)
+		return
+	}
+
+	q := parseHistoryQuery(r, id)
+	logs, err := h.store.ListActuatorLogs(r.Context(), q)
+	if err != nil {
+		http.Error(w, `{"error":"failed to fetch actuator history"}`, http.StatusInternalServerError)
+		return
+	}
+	if logs == nil {
+		logs = []*store.ActuatorLog{}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(logs)
 }

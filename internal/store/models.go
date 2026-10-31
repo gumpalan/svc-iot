@@ -2,6 +2,39 @@ package store
 
 import "errors"
 
+// SensorLog menyimpan satu pembacaan nilai sensor dari perangkat IoT.
+type SensorLog struct {
+	ID         string `json:"id"`
+	DeviceID   string `json:"deviceId"`
+	ChannelID  string `json:"channelId"`
+	Value      string `json:"value"`
+	RecordedAt int64  `json:"recordedAt"`
+}
+
+// ActuatorLog menyimpan satu eksekusi perintah ke aktuator beserta sumbernya.
+// Source: "app" | "automation" | "schedule" | "device"
+// ActorID: user_id jika source=app, rule_id jika source=automation/schedule, nil jika device
+// ActorName: nama tampilan (denormalisasi) untuk kemudahan UI
+type ActuatorLog struct {
+	ID         string  `json:"id"`
+	DeviceID   string  `json:"deviceId"`
+	ChannelID  string  `json:"channelId"`
+	Value      string  `json:"value"`
+	Source     string  `json:"source"`
+	ActorID    *string `json:"actorId,omitempty"`
+	ActorName  *string `json:"actorName,omitempty"`
+	RecordedAt int64   `json:"recordedAt"`
+}
+
+// HistoryQuery adalah parameter filter untuk query data historis.
+type HistoryQuery struct {
+	DeviceID  string
+	ChannelID string // kosong = semua channel pada device
+	From      int64  // unix timestamp inklusif, 0 = tidak dibatasi
+	To        int64  // unix timestamp inklusif, 0 = tidak dibatasi
+	Limit     int    // default 200, max 1000
+}
+
 var (
 	ErrNotFound      = errors.New("record not found")
 	ErrAccessDenied  = errors.New("access denied")

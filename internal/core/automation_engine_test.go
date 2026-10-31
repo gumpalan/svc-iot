@@ -31,6 +31,10 @@ func (m *mockExecutor) ExecuteCommand(deviceID, channelID string, value any) err
 	return nil
 }
 
+func (m *mockExecutor) ExecuteCommandFrom(deviceID, channelID string, value any, logEntry *store.ActuatorLog) error {
+	return m.ExecuteCommand(deviceID, channelID, value)
+}
+
 func TestAutomationEngine_StateTrigger(t *testing.T) {
 	devID := "sensor-1"
 	chID := "temperature"

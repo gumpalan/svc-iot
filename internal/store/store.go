@@ -627,3 +627,164 @@ func (s *Store) DeleteAutomationRule(ctx context.Context, id, userID string) err
 	}
 	return nil
 }
+
+// ----------------------------------------------------------------------
+// History: Sensor Logs
+// ----------------------------------------------------------------------
+
+func (s *Store) CreateSensorLog(ctx context.Context, l *SensorLog) error {
+	query := database.Rebind(s.dialect, `
+		INSERT INTO iot_sensor_logs (id, device_id, channel_id, value, recorded_at)
+		VALUES (?, ?, ?, ?, ?)
+	`)
+	_, err := s.db.ExecContext(ctx, query, l.ID, l.DeviceID, l.ChannelID, l.Value, l.RecordedAt)
+	if err != nil {
+		return fmt.Errorf("create sensor log: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListSensorLogs(ctx context.Context, q HistoryQuery) ([]*SensorLog, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	conds := []string{"device_id = ?"}
+	args := []any{q.DeviceID}
+
+	if q.ChannelID != "" {
+		conds = append(conds, "channel_id = ?")
+		args = append(args, q.ChannelID)
+	}
+	if q.From > 0 {
+		conds = append(conds, "recorded_at >= ?")
+		args = append(args, q.From)
+	}
+	if q.To > 0 {
+		conds = append(conds, "recorded_at <= ?")
+		args = append(args, q.To)
+	}
+
+	queryStr := fmt.Sprintf(`
+		SELECT id, device_id, channel_id, value, recorded_at
+		FROM iot_sensor_logs
+		WHERE %s
+		ORDER BY recorded_at DESC
+		LIMIT %d
+	`, strings.Join(conds, " AND "), limit)
+
+	rows, err := s.db.QueryContext(ctx, database.Rebind(s.dialect, queryStr), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list sensor logs: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*SensorLog
+	for rows.Next() {
+		var l SensorLog
+		if err := rows.Scan(&l.ID, &l.DeviceID, &l.ChannelID, &l.Value, &l.RecordedAt); err != nil {
+			return nil, fmt.Errorf("scan sensor log: %w", err)
+		}
+		list = append(list, &l)
+	}
+	return list, nil
+}
+
+// PurgeSensorLogs menghapus sensor log yang lebih tua dari cutoffUnix.
+func (s *Store) PurgeSensorLogs(ctx context.Context, cutoffUnix int64) (int64, error) {
+	query := database.Rebind(s.dialect, `DELETE FROM iot_sensor_logs WHERE recorded_at < ?`)
+	res, err := s.db.ExecContext(ctx, query, cutoffUnix)
+	if err != nil {
+		return 0, fmt.Errorf("purge sensor logs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+// ----------------------------------------------------------------------
+// History: Actuator Logs
+// ----------------------------------------------------------------------
+
+func (s *Store) CreateActuatorLog(ctx context.Context, l *ActuatorLog) error {
+	query := database.Rebind(s.dialect, `
+		INSERT INTO iot_actuator_logs (id, device_id, channel_id, value, source, actor_id, actor_name, recorded_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+	`)
+	_, err := s.db.ExecContext(ctx, query, l.ID, l.DeviceID, l.ChannelID, l.Value, l.Source, l.ActorID, l.ActorName, l.RecordedAt)
+	if err != nil {
+		return fmt.Errorf("create actuator log: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) ListActuatorLogs(ctx context.Context, q HistoryQuery) ([]*ActuatorLog, error) {
+	limit := q.Limit
+	if limit <= 0 {
+		limit = 200
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	conds := []string{"device_id = ?"}
+	args := []any{q.DeviceID}
+
+	if q.ChannelID != "" {
+		conds = append(conds, "channel_id = ?")
+		args = append(args, q.ChannelID)
+	}
+	if q.From > 0 {
+		conds = append(conds, "recorded_at >= ?")
+		args = append(args, q.From)
+	}
+	if q.To > 0 {
+		conds = append(conds, "recorded_at <= ?")
+		args = append(args, q.To)
+	}
+
+	queryStr := fmt.Sprintf(`
+		SELECT id, device_id, channel_id, value, source, actor_id, actor_name, recorded_at
+		FROM iot_actuator_logs
+		WHERE %s
+		ORDER BY recorded_at DESC
+		LIMIT %d
+	`, strings.Join(conds, " AND "), limit)
+
+	rows, err := s.db.QueryContext(ctx, database.Rebind(s.dialect, queryStr), args...)
+	if err != nil {
+		return nil, fmt.Errorf("list actuator logs: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*ActuatorLog
+	for rows.Next() {
+		var l ActuatorLog
+		var actorID, actorName sql.NullString
+		if err := rows.Scan(&l.ID, &l.DeviceID, &l.ChannelID, &l.Value, &l.Source, &actorID, &actorName, &l.RecordedAt); err != nil {
+			return nil, fmt.Errorf("scan actuator log: %w", err)
+		}
+		if actorID.Valid {
+			l.ActorID = &actorID.String
+		}
+		if actorName.Valid {
+			l.ActorName = &actorName.String
+		}
+		list = append(list, &l)
+	}
+	return list, nil
+}
+
+// PurgeActuatorLogs menghapus actuator log yang lebih tua dari cutoffUnix.
+func (s *Store) PurgeActuatorLogs(ctx context.Context, cutoffUnix int64) (int64, error) {
+	query := database.Rebind(s.dialect, `DELETE FROM iot_actuator_logs WHERE recorded_at < ?`)
+	res, err := s.db.ExecContext(ctx, query, cutoffUnix)
+	if err != nil {
+		return 0, fmt.Errorf("purge actuator logs: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}

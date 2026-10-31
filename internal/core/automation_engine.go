@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gumpalan/svc-iot/internal/config"
 	"github.com/gumpalan/svc-iot/internal/store"
 )
 
@@ -16,13 +17,21 @@ type AutomationStore interface {
 	ListActiveAutomationRules(ctx context.Context) ([]*store.AutomationRule, error)
 }
 
+// HistoryStore adalah subset store.Store untuk pencatatan actuator log dari automation engine.
+type HistoryStore interface {
+	CreateActuatorLog(ctx context.Context, l *store.ActuatorLog) error
+}
+
 type CommandExecutor interface {
 	ExecuteCommand(deviceID, channelID string, value any) error
+	ExecuteCommandFrom(deviceID, channelID string, value any, logEntry *store.ActuatorLog) error
 }
 
 type AutomationEngine struct {
-	store    AutomationStore
-	executor CommandExecutor
+	store       AutomationStore
+	histStore   HistoryStore
+	executor    CommandExecutor
+	historyCfg  config.HistoryConfig
 
 	mu        sync.RWMutex
 	rules     []*store.AutomationRule
@@ -39,6 +48,14 @@ func NewAutomationEngine(st AutomationStore, exec CommandExecutor) *AutomationEn
 		lastFired: make(map[string]int64),
 		stopCh:    make(chan struct{}),
 	}
+}
+
+// SetHistoryStore menetapkan store dan konfigurasi untuk pencatatan actuator log.
+func (e *AutomationEngine) SetHistoryStore(hs HistoryStore, cfg config.HistoryConfig) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.histStore = hs
+	e.historyCfg = cfg
 }
 
 // ReloadRules membaca ulang seluruh aturan aktif dari database ke memori
@@ -103,7 +120,24 @@ func (e *AutomationEngine) EvaluateStateChange(deviceID, channelID string, newVa
 
 			go func(rule *store.AutomationRule) {
 				parsedActionVal := parseFlexibleValue(rule.ActionValue)
-				if err := e.executor.ExecuteCommand(rule.ActionDeviceID, rule.ActionChannelID, parsedActionVal); err != nil {
+				logEntry := (*store.ActuatorLog)(nil)
+
+				e.mu.RLock()
+				hs := e.histStore
+				hcfg := e.historyCfg
+				e.mu.RUnlock()
+
+				if hs != nil && hcfg.LogActuator() {
+					ruleID := rule.ID
+					ruleName := rule.Name
+					logEntry = &store.ActuatorLog{
+						Source:    "automation",
+						ActorID:   &ruleID,
+						ActorName: &ruleName,
+					}
+				}
+
+				if err := e.executor.ExecuteCommandFrom(rule.ActionDeviceID, rule.ActionChannelID, parsedActionVal, logEntry); err != nil {
 					log.Printf("[Automation] Gagal menjalankan aksi aturan '%s': %v", rule.Name, err)
 				}
 			}(r)
@@ -179,7 +213,24 @@ func (e *AutomationEngine) evaluateSchedules() {
 
 			go func(rule *store.AutomationRule) {
 				parsedActionVal := parseFlexibleValue(rule.ActionValue)
-				if err := e.executor.ExecuteCommand(rule.ActionDeviceID, rule.ActionChannelID, parsedActionVal); err != nil {
+				logEntry := (*store.ActuatorLog)(nil)
+
+				e.mu.RLock()
+				hs := e.histStore
+				hcfg := e.historyCfg
+				e.mu.RUnlock()
+
+				if hs != nil && hcfg.LogActuator() {
+					ruleID := rule.ID
+					ruleName := rule.Name
+					logEntry = &store.ActuatorLog{
+						Source:    "schedule",
+						ActorID:   &ruleID,
+						ActorName: &ruleName,
+					}
+				}
+
+				if err := e.executor.ExecuteCommandFrom(rule.ActionDeviceID, rule.ActionChannelID, parsedActionVal, logEntry); err != nil {
 					log.Printf("[Automation] Gagal menjalankan aksi jadwal '%s': %v", rule.Name, err)
 				}
 			}(r)

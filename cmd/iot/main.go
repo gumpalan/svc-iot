@@ -80,15 +80,54 @@ func main() {
 	log.Println("Memulai Gumpalan IoT Service...")
 	log.Printf("Berhasil memuat konfigurasi perangkat dari %s (%d perangkat terdaftar)", devConfigPath, len(devCfg.Devices))
 
+	// Muat konfigurasi history
+	historyCfg := config.LoadHistoryConfig()
+	if historyCfg.Enabled() {
+		log.Printf("[History] Mode: %s, Retensi: %d hari", historyCfg.Mode, historyCfg.RetentionDays)
+	}
+
 	// 3. Inisialisasi State Hub & Automation Engine
 	hub := core.NewStateHub(registry, nil)
+	if historyCfg.Enabled() {
+		hub.SetHistoryStore(st, historyCfg)
+	}
 	autoEngine := core.NewAutomationEngine(st, hub)
+	if historyCfg.Enabled() {
+		autoEngine.SetHistoryStore(st, historyCfg)
+	}
 	if err := autoEngine.ReloadRules(context.Background()); err != nil {
 		log.Printf("[Automation] Gagal memuat aturan awal: %v", err)
 	}
 	autoEngine.StartScheduler()
 	defer autoEngine.Stop()
 	hub.SetAutomationEngine(autoEngine)
+
+	// Jalankan purge historis secara berkala jika retensi dikonfigurasi
+	if historyCfg.Enabled() && historyCfg.RetentionDays > 0 {
+		go func() {
+			ticker := time.NewTicker(6 * time.Hour)
+			defer ticker.Stop()
+			for range ticker.C {
+				cutoff := time.Now().AddDate(0, 0, -historyCfg.RetentionDays).Unix()
+				if historyCfg.LogSensor() {
+					n, err := st.PurgeSensorLogs(context.Background(), cutoff)
+					if err != nil {
+						log.Printf("[History] Purge sensor logs gagal: %v", err)
+					} else if n > 0 {
+						log.Printf("[History] Purge sensor logs: %d baris dihapus", n)
+					}
+				}
+				if historyCfg.LogActuator() {
+					n, err := st.PurgeActuatorLogs(context.Background(), cutoff)
+					if err != nil {
+						log.Printf("[History] Purge actuator logs gagal: %v", err)
+					} else if n > 0 {
+						log.Printf("[History] Purge actuator logs: %d baris dihapus", n)
+					}
+				}
+			}
+		}()
+	}
 
 	// 4. Inisialisasi MQTT client secara asinkron agar tidak memblokir HTTP listener jika broker offline
 	mqttCfg := mqtt.LoadConfig()
@@ -116,6 +155,7 @@ func main() {
 	mux := http.NewServeMux()
 	handler := httpapi.NewHandler(registry, hub, st)
 	handler.SetAutomationEngine(autoEngine)
+	handler.SetHistoryConfig(historyCfg)
 	handler.RegisterRoutes(mux)
 
 	port := os.Getenv("PORT")
